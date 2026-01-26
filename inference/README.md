@@ -22,14 +22,14 @@ OC(=O)CC[C@@H](C(=O)N[C@@H](Cc1ccccc1)C...
 
 ### 3. Configure Inference
 
-Edit `../configs/inference.yaml`:
+Edit `configs/inference.yaml`:
 
 ```yaml
 mode:
   ddp: false
 
 inference:
-  device_ids: [0]              # GPU device IDs, empty for CPU
+  device_ids: [0]              # GPU device IDs, empty [] for CPU
   data: '../data/example.smi'  # Path to input SMILES file
   model_path: "./cpkt/model"   # Path to model checkpoint
   pool: avg                    # Pooling method: avg or max
@@ -39,7 +39,7 @@ inference:
 ### 4. Run Inference
 
 ```bash
-cd /home/richard/projects/pepland/inference
+cd inference
 python inference_pepland.py
 ```
 

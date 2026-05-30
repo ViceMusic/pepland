@@ -14,6 +14,7 @@ class SupervisedMolGraphDataset(Dataset):
         self.smiles_col = smiles_col
         self.label_col = label_col
         self.frag = frag
+        self.unfound_fragments = set()
 
         missing = {smiles_col, label_col} - set(self.df.columns)
         if missing:
@@ -31,9 +32,14 @@ class SupervisedMolGraphDataset(Dataset):
         if mol is None:
             raise ValueError(f"Invalid SMILES at row {index}: {smi}")
 
-        graph = Mol2HeteroGraph(mol, frag=self.frag)
+        graph = Mol2HeteroGraph(mol,
+                                frag=self.frag,
+                                unfound_fragments=self.unfound_fragments)
         label = torch.tensor(row[self.label_col])
         return graph, label
+
+    def get_unfound_fragments(self):
+        return set(self.unfound_fragments)
 
 
 def supervised_collate(samples):

@@ -1,6 +1,7 @@
 import os
 
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.metrics import (accuracy_score, average_precision_score,
                              f1_score, precision_score, recall_score)
@@ -14,18 +15,57 @@ from model.supervised import (PepLandClassifier, SupervisedMolGraphDataset,
 
 
 CONFIG = {
-    # Data. CSV files must contain columns named by smiles_col and label_col.
-    "train_csv": "data/your_dataset/train.csv",
-    "test_csv": "data/your_dataset/test.csv",
-    "smiles_col": "smiles",
+    # ============================================================
+    # Task config
+    # ============================================================
+    # Choose one task: "sif" or "sgf".
+    # The script will:
+    #   1. select train/test csv according to the task,
+    #   2. use SIF_minutes or SGF_minutes as the original time column,
+    #   3. convert minutes into binary label:
+    #          label = 1 if minutes >= threshold else 0.
+    "task": "sgf",  # "sif" or "sgf"
+
+    "task_config": {
+        "sif": {
+            "train_csv": "filtered_csv/Train_sif.csv",
+            "test_csv": "filtered_csv/Test_sif.csv",
+            "time_col": "SIF_minutes",
+            "threshold": 270,
+        },
+        "sgf": {
+            "train_csv": "filtered_csv/Train_sgf.csv",
+            "test_csv": "filtered_csv/Test_sgf.csv",
+            "time_col": "SGF_minutes",
+            "threshold": 250,
+        },
+    },
+
+    # Raw csv columns.
+    # Your csv uses "SMILES" rather than "smiles".
+    "smiles_col": "SMILES",
+
+    # The generated binary label column name.
+    # SupervisedMolGraphDataset will read this column.
     "label_col": "label",
+
+    # Where to save temporary csv files with generated labels.
+    # This does not overwrite your original csv files.
+    "processed_data_dir": "outputs/processed_supervised_csv",
+
+    # Validation split ratio from the training csv.
     "valid_ratio": 0.1,
 
-    # Repeated runs. Each run uses base_seed + run_id for reproducible splitting.
+    # ============================================================
+    # Repeated runs
+    # ============================================================
+    # Each run uses base_seed + run_id for reproducible splitting.
     "num_runs": 5,
     "base_seed": 0,
 
-    # Training.
+    # ============================================================
+    # Training
+    # ============================================================
     "epochs": 20,
     "batch_size": 32,
     "lr": 1e-4,
@@ -34,7 +74,10 @@ CONFIG = {
     "device": "cuda:0",
     "output_dir": "outputs/supervised",
 
-    # Model.
+    # ============================================================
+    # Model
+    # ============================================================
+    # 不使用预训练权重
     "pool": "avg",
     "dropout": 0.1,
     "fragment": "258",
@@ -46,6 +89,73 @@ CONFIG = {
     "reac_dim": 14,
     "act": "ReLU",
 }
+
+
+def get_task_config():
+    task = CONFIG["task"].lower()
+    if task not in CONFIG["task_config"]:
+        raise ValueError(
+            f"Unknown task: {CONFIG['task']}. "
+            f"Expected one of {list(CONFIG['task_config'].keys())}."
+        )
+    return CONFIG["task_config"][task]
+
+
+def get_train_csv():
+    return get_task_config()["train_csv"]
+
+
+def get_test_csv():
+    return get_task_config()["test_csv"]
+
+
+def prepare_labeled_csv(csv_path, split_name):
+    """
+    Read the original csv, generate binary label according to CONFIG["task"],
+    and save a temporary processed csv.
+
+    This function does not modify the original csv.
+    """
+    task = CONFIG["task"].lower()
+    task_cfg = get_task_config()
+
+    smiles_col = CONFIG["smiles_col"]
+    label_col = CONFIG["label_col"]
+    time_col = task_cfg["time_col"]
+    threshold = task_cfg["threshold"]
+
+    df = pd.read_csv(csv_path)
+
+    required_cols = [smiles_col, time_col]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(
+            f"{csv_path} is missing required columns: {missing_cols}. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    # Convert original minutes into binary label.
+    # label = 1 if half-life >= threshold else 0.
+    df[label_col] = (df[time_col].astype(float) >= threshold).astype(int)
+
+    os.makedirs(CONFIG["processed_data_dir"], exist_ok=True)
+    processed_csv = os.path.join(
+        CONFIG["processed_data_dir"],
+        f"{task}_{split_name}_threshold_{threshold}.csv"
+    )
+    df.to_csv(processed_csv, index=False)
+
+    num_pos = int(df[label_col].sum())
+    num_total = int(len(df))
+    num_neg = num_total - num_pos
+    print(
+        f"[Data] task={task.upper()} split={split_name} "
+        f"source={csv_path} processed={processed_csv} "
+        f"time_col={time_col} threshold={threshold} "
+        f"total={num_total} pos={num_pos} neg={num_neg}"
+    )
+
+    return processed_csv
 
 
 def get_device():
@@ -87,16 +197,19 @@ def build_dataset(csv_path):
 
 
 def make_train_valid_loaders(seed):
-    dataset = build_dataset(CONFIG["train_csv"])
+    train_csv = prepare_labeled_csv(get_train_csv(), split_name="train")
+    dataset = build_dataset(train_csv)
+
     valid_size = max(1, int(len(dataset) * CONFIG["valid_ratio"]))
     train_size = len(dataset) - valid_size
     if train_size <= 0:
-        raise ValueError("Training set is too small for a 10% validation split.")
+        raise ValueError("Training set is too small for the validation split.")
 
     generator = torch.Generator().manual_seed(seed)
     train_set, valid_set = random_split(dataset,
                                         [train_size, valid_size],
                                         generator=generator)
+
     train_loader = DataLoader(train_set,
                               batch_size=CONFIG["batch_size"],
                               shuffle=True,
@@ -107,16 +220,18 @@ def make_train_valid_loaders(seed):
                               shuffle=False,
                               num_workers=CONFIG["num_workers"],
                               collate_fn=supervised_collate)
-    return train_loader, valid_loader
+    return train_loader, valid_loader, dataset
 
 
 def make_test_loader():
-    test_set = build_dataset(CONFIG["test_csv"])
-    return DataLoader(test_set,
-                      batch_size=CONFIG["batch_size"],
-                      shuffle=False,
-                      num_workers=CONFIG["num_workers"],
-                      collate_fn=supervised_collate)
+    test_csv = prepare_labeled_csv(get_test_csv(), split_name="test")
+    test_set = build_dataset(test_csv)
+    test_loader = DataLoader(test_set,
+                             batch_size=CONFIG["batch_size"],
+                             shuffle=False,
+                             num_workers=CONFIG["num_workers"],
+                             collate_fn=supervised_collate)
+    return test_loader, test_set
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
@@ -178,13 +293,30 @@ def evaluate(model, loader, criterion, device):
     }
 
 
+def collect_unfound_fragments(train_dataset, test_dataset):
+    return (
+        train_dataset.get_unfound_fragments()
+        | test_dataset.get_unfound_fragments()
+    )
+
+
+def print_unfound_fragments(unfound_fragments):
+    if not unfound_fragments:
+        print("\nUnfound fragments: 0")
+        return
+
+    print(f"\nUnfound fragments: {len(unfound_fragments)}")
+    for frag in sorted(unfound_fragments):
+        print(f"unfound_fragment {frag}")
+
+
 def run_once(run_id):
     seed = CONFIG["base_seed"] + run_id
     fix_random_seed(seed)
     device = get_device()
 
-    train_loader, valid_loader = make_train_valid_loaders(seed)
-    test_loader = make_test_loader()
+    train_loader, valid_loader, train_dataset = make_train_valid_loaders(seed)
+    test_loader, test_dataset = make_test_loader()
 
     encoder = build_encoder(device)
     model = PepLandClassifier(encoder,
@@ -199,8 +331,10 @@ def run_once(run_id):
 
     os.makedirs(CONFIG["output_dir"], exist_ok=True)
     best_valid_f1 = -1.0
-    best_path = os.path.join(CONFIG["output_dir"],
-                             f"best_supervised_run_{run_id}.pt")
+    best_path = os.path.join(
+        CONFIG["output_dir"],
+        f"best_supervised_{CONFIG['task'].lower()}_run_{run_id}.pt"
+    )
 
     for epoch in range(CONFIG["epochs"]):
         train_loss = train_one_epoch(model, train_loader, criterion,
@@ -228,17 +362,31 @@ def run_once(run_id):
         f"precision {test_metrics['precision']:.4f} "
         f"recall {test_metrics['recall']:.4f}"
     )
-    return test_metrics
-
+    return test_metrics, collect_unfound_fragments(train_dataset, test_dataset)
 
 def main():
-    results = [run_once(run_id) for run_id in range(CONFIG["num_runs"])]
+    task_cfg = get_task_config()
+    print(
+        f"[Config] task={CONFIG['task'].upper()} "
+        f"train_csv={task_cfg['train_csv']} "
+        f"test_csv={task_cfg['test_csv']} "
+        f"time_col={task_cfg['time_col']} "
+        f"threshold={task_cfg['threshold']}"
+    )
+
+    run_outputs = [run_once(run_id) for run_id in range(CONFIG["num_runs"])]
+    results = [metrics for metrics, _ in run_outputs]
+    unfound_fragments = set()
+    for _, run_unfound_fragments in run_outputs:
+        unfound_fragments.update(run_unfound_fragments)
     metric_names = ["acc", "auprc", "f1", "precision", "recall"]
 
     print("\nAverage over {} runs:".format(CONFIG["num_runs"]))
     for name in metric_names:
         values = np.array([result[name] for result in results], dtype=float)
         print(f"{name}: {values.mean():.4f} +/- {values.std():.4f}")
+
+    print_unfound_fragments(unfound_fragments)
 
 
 if __name__ == "__main__":

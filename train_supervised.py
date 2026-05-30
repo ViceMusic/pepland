@@ -4,13 +4,13 @@ import numpy as np
 import torch
 from sklearn.metrics import (accuracy_score, average_precision_score,
                              f1_score, precision_score, recall_score)
+from torch.backends import cudnn
 from torch import nn
-from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data import DataLoader, random_split
 
 from model.model import PharmHGT
 from model.supervised import (PepLandClassifier, SupervisedMolGraphDataset,
                               supervised_collate)
-from utils.utils import fix_random_seed, load_model_masking
 
 
 CONFIG = {
@@ -35,7 +35,6 @@ CONFIG = {
     "output_dir": "outputs/supervised",
 
     # Model.
-    "pretrained_model_path": None,  # Example: "./inference/cpkt/"
     "pool": "avg",
     "dropout": 0.1,
     "fragment": "258",
@@ -56,12 +55,25 @@ def get_device():
     return torch.device(device_name)
 
 
-def build_encoder(device):
-    model_path = CONFIG["pretrained_model_path"]
-    if model_path:
-        encoder, _, _ = load_model_masking(model_path, device)
-        return encoder
+def fix_random_seed(random_seed, cuda_deterministic=True):
+    import random
 
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(random_seed)
+
+    if cuda_deterministic:
+        cudnn.deterministic = True
+        cudnn.benchmark = False
+    else:
+        cudnn.deterministic = False
+        cudnn.benchmark = True
+
+
+def build_encoder(device):
     return PharmHGT(CONFIG["hid_dim"], CONFIG["act"], CONFIG["num_layer"],
                     CONFIG["atom_dim"], CONFIG["bond_dim"],
                     CONFIG["pharm_dim"], CONFIG["reac_dim"]).to(device)

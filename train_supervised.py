@@ -8,7 +8,6 @@ from sklearn.metrics import (accuracy_score, average_precision_score,
 from torch.backends import cudnn
 from torch import nn
 from torch.utils.data import DataLoader, random_split
-from model.data import report_unfound_fragments
 
 from model.model import PharmHGT
 from model.supervised import (PepLandClassifier, SupervisedMolGraphDataset,
@@ -25,7 +24,7 @@ CONFIG = {
     #   2. use SIF_minutes or SGF_minutes as the original time column,
     #   3. convert minutes into binary label:
     #          label = 1 if minutes >= threshold else 0.
-    "task": "sgf",  # "sif" or "sgf"
+    "task": "sif",  # "sif" or "sgf"
 
     "task_config": {
         "sif": {
@@ -81,7 +80,7 @@ CONFIG = {
     # 不使用预训练权重
     "pool": "avg",
     "dropout": 0.1,
-    "fragment": "258",  #这里或许可以修改一下
+    "fragment": "258",
     "hid_dim": 300,
     "num_layer": 5,
     "atom_dim": 42,
@@ -221,17 +220,18 @@ def make_train_valid_loaders(seed):
                               shuffle=False,
                               num_workers=CONFIG["num_workers"],
                               collate_fn=supervised_collate)
-    return train_loader, valid_loader
+    return train_loader, valid_loader, dataset
 
 
 def make_test_loader():
     test_csv = prepare_labeled_csv(get_test_csv(), split_name="test")
     test_set = build_dataset(test_csv)
-    return DataLoader(test_set,
-                      batch_size=CONFIG["batch_size"],
-                      shuffle=False,
-                      num_workers=CONFIG["num_workers"],
-                      collate_fn=supervised_collate)
+    test_loader = DataLoader(test_set,
+                             batch_size=CONFIG["batch_size"],
+                             shuffle=False,
+                             num_workers=CONFIG["num_workers"],
+                             collate_fn=supervised_collate)
+    return test_loader, test_set
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
@@ -293,13 +293,30 @@ def evaluate(model, loader, criterion, device):
     }
 
 
+def collect_unfound_fragments(train_dataset, test_dataset):
+    return (
+        train_dataset.get_unfound_fragments()
+        | test_dataset.get_unfound_fragments()
+    )
+
+
+def print_unfound_fragments(unfound_fragments):
+    if not unfound_fragments:
+        print("\nUnfound fragments: 0")
+        return
+
+    print(f"\nUnfound fragments: {len(unfound_fragments)}")
+    for frag in sorted(unfound_fragments):
+        print(f"unfound_fragment {frag}")
+
+
 def run_once(run_id):
     seed = CONFIG["base_seed"] + run_id
     fix_random_seed(seed)
     device = get_device()
 
-    train_loader, valid_loader = make_train_valid_loaders(seed)
-    test_loader = make_test_loader()
+    train_loader, valid_loader, train_dataset = make_train_valid_loaders(seed)
+    test_loader, test_dataset = make_test_loader()
 
     encoder = build_encoder(device)
     model = PepLandClassifier(encoder,
@@ -345,8 +362,7 @@ def run_once(run_id):
         f"precision {test_metrics['precision']:.4f} "
         f"recall {test_metrics['recall']:.4f}"
     )
-    return test_metrics
-
+    return test_metrics, collect_unfound_fragments(train_dataset, test_dataset)
 
 def main():
     task_cfg = get_task_config()
@@ -358,7 +374,11 @@ def main():
         f"threshold={task_cfg['threshold']}"
     )
 
-    results = [run_once(run_id) for run_id in range(CONFIG["num_runs"])]
+    run_outputs = [run_once(run_id) for run_id in range(CONFIG["num_runs"])]
+    results = [metrics for metrics, _ in run_outputs]
+    unfound_fragments = set()
+    for _, run_unfound_fragments in run_outputs:
+        unfound_fragments.update(run_unfound_fragments)
     metric_names = ["acc", "auprc", "f1", "precision", "recall"]
 
     print("\nAverage over {} runs:".format(CONFIG["num_runs"]))
@@ -366,7 +386,7 @@ def main():
         values = np.array([result[name] for result in results], dtype=float)
         print(f"{name}: {values.mean():.4f} +/- {values.std():.4f}")
 
-    report_unfound_fragments()
+    print_unfound_fragments(unfound_fragments)
 
 
 if __name__ == "__main__":
